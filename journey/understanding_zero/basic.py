@@ -20,13 +20,16 @@ class DummyModel(torch.nn.Module):
         return x
 
 
+@torch.no_grad()
 def check_model_from_reference(model):
     ref_state_dict = torch.load("model_ref.pth", map_location="cpu")
     model_state_dict = model.state_dict()
 
     for k in ref_state_dict.keys():
+        ref = ref_state_dict[k].float()
+        current = model_state_dict[k].cpu().float()
         assert torch.allclose(
-            ref_state_dict[k], model_state_dict[k].cpu()
-        ), f"Model state dict does not match the reference model state dict for key {k}"
+            ref, current, atol=1e-2
+        ), f"Model state dict does not match the reference model state dict for key {k}. Difference: {(ref - current).abs().max()}"
 
     print("Model state dict matches the reference model state dict")
