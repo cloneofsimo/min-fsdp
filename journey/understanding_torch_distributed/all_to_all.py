@@ -11,6 +11,7 @@ def init_process(rank, size, fn, backend="nccl"):
     fn(rank, size)
 
 
+
 def run(rank, size):
 
     send_tensors = [

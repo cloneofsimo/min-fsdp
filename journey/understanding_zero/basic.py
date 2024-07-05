@@ -13,6 +13,7 @@ class DummyModel(torch.nn.Module):
         super(DummyModel, self).__init__()
         self.fc1 = torch.nn.Linear(10, 10)
         self.fc2 = torch.nn.Linear(10, 1)
+        # self.fc3 = torch.nn.Linear(100, 100)
 
     def forward(self, x):
         x = torch.relu(self.fc1(x))

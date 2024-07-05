@@ -1,6 +1,6 @@
 # So why is 3 not Zero-1 yet?
 # 1. We need to do mixed-precision!
-# 2. gradients could be in better form, we can use hooks to form gradients in unfragmented way.
+# 2. gradients could be in single bucket, we can use hooks to form gradients in unfragmented way.
 # 3. minor details, such as skipping small params / checking for required_grad, and accepting param_group as input is all missing.
 
 
@@ -63,11 +63,17 @@ class Zero1AdamOptimizer:
         self.v = torch.zeros(current_offset).to(self.device)
         self.m = torch.zeros(current_offset).to(self.device)
         self.sharded_fp32_master_param = torch.zeros(current_offset).to(self.device)
-        self.local_grad_buffer = torch.zeros(current_offset).to(self.device)
+        self.local_grad_buffer_hp = torch.zeros(current_offset).to(
+            self.device, dtype=forward_dtype
+        )
 
         for idx, (_, param) in enumerate(self._local_params()):
             si_s, si_e = self.shard_indices[idx]
             self.sharded_fp32_master_param[si_s:si_e] = param.data.view(-1).float()
+
+            # set grad as well.
+            param.grad = torch.zeros_like(param.data)
+            param.grad.data = self.local_grad_buffer_hp[si_s:si_e].view_as(param.data)
 
     def _local_params(self):
         # iterator that returns set of params this rank is responsible of.
@@ -92,22 +98,12 @@ class Zero1AdamOptimizer:
             if param.grad is not None:
                 param.grad.data.zero_()
 
-    def step(self):
-
-        self.reduce_all_grads()
-
-        dist.barrier()
-
-        for idx, (_, param) in enumerate(self._local_params()):
-            si_s, si_e = self.shard_indices[idx]
-            self.local_grad_buffer[si_s:si_e] = param.grad.data.view(-1).float()
-
-        # These operation happens-per-device!
-        self.t += 1
-        self.v.mul_(self.beta2).addcmul_(
-            self.local_grad_buffer, self.local_grad_buffer, value=1 - self.beta2
-        )
-        self.m.mul_(self.beta1).add_(self.local_grad_buffer, alpha=1 - self.beta1)
+    @torch.compile()
+    def adam_step(self):
+        # Zero-1 Adam with compile!
+        grad_fp = self.local_grad_buffer_hp.float()
+        self.v.mul_(self.beta2).addcmul_(grad_fp, grad_fp, value=1 - self.beta2)
+        self.m.mul_(self.beta1).add_(grad_fp, alpha=1 - self.beta1)
 
         m_hat = self.m / (1 - self.beta1**self.t)
         v_hat = self.v / (1 - self.beta2**self.t)
@@ -116,12 +112,23 @@ class Zero1AdamOptimizer:
             self.lr * m_hat / (torch.sqrt(v_hat) + self.eps)
         )
 
+    def step(self):
+
+        self.reduce_all_grads()
+
+        dist.barrier()
+
+        # These operation happens-per-device!
+        self.t += 1.0
+
+        self.adam_step()
+
         dist.barrier()
 
         # now sync the sharded_fp32_master_param to the actual model parameters.
         localidx = 0
         for idx, param in enumerate(self.params):
-            to_send = param.data.view(-1)
+            to_send = torch.zeros_like(param.data.view(-1))
 
             if idx in self.local_param_indices:
                 si_s, si_e = self.shard_indices[localidx]

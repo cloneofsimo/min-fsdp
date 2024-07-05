@@ -16,7 +16,9 @@ class NotYetButCloseZero1AdamOptimizer:
     def __init__(
         self, params, lr=0.001, betas=(0.9, 0.999), eps=1e-8, skip_small_parameters=5
     ):
-        self.params = list(params)
+        self.params = list(
+            params
+        )  # fc1.weight.data, fc1.bias.data, fc2.weight.data, fc2.bias.data, final.weight.data
         self.lr = lr
         self.beta1, self.beta2 = betas
         self.eps = eps
@@ -31,6 +33,8 @@ class NotYetButCloseZero1AdamOptimizer:
         self.shard_indices = []
 
         self.param_flattened = torch.cat([param.data.view(-1) for param in self.params])
+
+        # 2M
         offset = 0
         for param in self.params:
             # view flatten
@@ -39,6 +43,7 @@ class NotYetButCloseZero1AdamOptimizer:
             ].view_as(param.data)
             offset += param.data.numel()
 
+        # 1M, 1M
         current_offset = 0
         # Initialize config per-shard.
         for _, param in self._local_params():
@@ -57,12 +62,21 @@ class NotYetButCloseZero1AdamOptimizer:
             si_s, si_e = self.shard_indices[idx]
             self.sharded_fp32_master_param[si_s:si_e] = param.data.view(-1)
 
+        dist.barrier()
+        print(
+            f"Rank {self.local_rank}",
+            self.sharded_fp32_master_param.shape,
+            self.shard_indices,
+        )
+        dist.barrier()
+
     def _local_params(self):
+
         # iterator that returns set of params this rank is responsible of.
         idx = 0
         for param in self.params:
             if idx % self.local_world_size == self.local_rank:
-                yield idx, param
+                yield idx, param  # 0, fc1.weight.data, 2, fc2.weight.data,
             idx += 1
 
     def reduce_all_grads(self):
@@ -80,7 +94,9 @@ class NotYetButCloseZero1AdamOptimizer:
             si_s, si_e = self.shard_indices[idx]
             self.local_grad_buffer[si_s:si_e] = param.grad.data.view(-1)
 
+        print(f"Rank: {self.local_rank}", self.local_grad_buffer.shape)
         # These operation happens-per-device!
+
         self.t += 1
         self.v.mul_(self.beta2).addcmul_(
             self.local_grad_buffer, self.local_grad_buffer, value=1 - self.beta2
@@ -120,13 +136,14 @@ def train():
     world_size = int(os.environ["WORLD_SIZE"])
 
     print(f"Running DDP example on rank {rank}, world size: {world_size}")
+
     dist.init_process_group(backend="nccl", init_method="env://")
 
     device = f"cuda:{rank}"
 
     model = DummyModel().to(device)
 
-    optimizer = NotYetButCloseZero1AdamOptimizer(model.parameters(), lr=4.0)
+    optimizer = NotYetButCloseZero1AdamOptimizer(model.parameters(), lr=1e-1)
 
     input = torch.randn(10, generator=torch.Generator().manual_seed(42)).to(device)
     target = torch.randn(1, generator=torch.Generator().manual_seed(42)).to(device)
